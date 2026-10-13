@@ -2,10 +2,12 @@
 # bundle exec rails runner plugins/redmine_work_time/test/compatibility_smoke.rb
 require 'securerandom'
 require 'nokogiri'
+require 'csv'
 STDOUT.sync = true
 
 raise 'Use the development or test database' unless Rails.env.development? || Rails.env.test?
 ActionMailer::Base.perform_deliveries = false
+ActionController::Base.allow_forgery_protection = true
 checks = 0
 check = lambda do |condition, description|
   raise "FAIL: #{description}" unless condition
@@ -46,8 +48,13 @@ begin
     session.post '/login', params: {username: user.login, password: password, authenticity_token: token}
     check.call(session.response.redirect?, 'non-admin login')
     period = {id: project.id, user: user.id, year: date.year, month: date.month, day: date.day, prj: project.id}
-    request = lambda do |action, params = {}, status = 200|
-      session.get "/work_time/#{action}", params: period.merge(params)
+    request = lambda do |action, params = {}, status = 200, method = :get|
+      if method == :post
+        session.get '/work_time/index', params: {user: user.id}
+        csrf = Nokogiri::HTML(session.response.body).at_css('meta[name="csrf-token"]')&.[]('content')
+        params = params.merge(authenticity_token: csrf)
+      end
+      session.public_send(method, "/work_time/#{action}", params: period.merge(params))
       check.call(session.response.status == status,
                  "GET #{action}: #{status} (got #{session.response.status})")
       session.response
@@ -58,7 +65,7 @@ begin
     request.call('ajax_relay', {issue_id: issue.id})
     request.call('ajax_relay', {}, 200)
     check.call(session.response.body == 'ERROR: no issue_id', 'missing relay issue returns plain text')
-    request.call('ajax_add_tickets_insert', {add_issue: -1, count: 0})
+    request.call('ajax_add_tickets_insert', {add_issue: -1, count: 0}, 200, :post)
     request.call('show')
     check.call(session.response.body.include?(issue.subject), 'daily/monthly view includes the test issue')
     check.call(session.response.body.include?('4.75'), 'daily/monthly view displays decimal hours')
@@ -67,7 +74,7 @@ begin
     check.call(session.response.body.include?(',4.75') && !session.response.body.include?('19/4'),
                'member CSV contains decimal hours rather than fractions')
     request.call('member_monthly_data_table')
-    check.call(session.response.body.include?('"4.75"'), 'monthly matrix CSV contains decimal hours')
+    check.call(CSV.parse(session.response.body).flatten.include?('4.75'), 'monthly matrix CSV contains decimal hours')
     request.call('total')
     request.call('relay_total')
     %w(total_data total_data_with_act relay_total_data relay_total_data_with_act).each do |action|

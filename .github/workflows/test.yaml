@@ -17,14 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - redmine-version: "6.0"
+          - redmine-version: "6.1"
             ruby-version: "3.3"
           - redmine-version: "6.1"
             ruby-version: "3.4"
-          - redmine-version: "7.0"
-            ruby-version: "4.0"
-          - redmine-version: "master"
-            ruby-version: "4.0"
     steps:
       - uses: actions/checkout@v7
       - name: Setup environment variables
@@ -65,7 +61,15 @@ jobs:
           bin/rails db:migrate
           bin/rails redmine:plugins:migrate
           REDMINE_LANG=en bin/rails redmine:load_default_data
-      - name: Test
+      - name: Compatibility and authorization regressions
+        run: |
+          cd ../redmine
+          bin/rails zeitwerk:check
+          bin/rails runner plugins/redmine_work_time/test/compatibility_smoke.rb
+          bin/rails runner plugins/redmine_work_time/test/workflow_audit.rb
+          bin/rails runner plugins/redmine_work_time/test/reload_smoke.rb
+          node --check plugins/redmine_work_time/assets/javascripts/work_time.js
+      - name: Inherited tests
         run: |
           cd ../redmine
           bin/rails redmine:plugins:test NAME=redmine_work_time

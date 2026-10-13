@@ -10,15 +10,9 @@
 <%end%>
   <%if User.current.admin then%>
       <%if WtHolidays.where(["holiday=:h and deleted_on is null",{:h=>@this_date}]).all.size == 0 then %>
-          <input type="button"
-                 onclick="location.href='<%=url_for(@link_params.merge(:set_holiday=>@this_date))%>'"
-                 value="<%=l(:wt_set_holiday)%>"
-          />
+          <%= button_to l(:wt_set_holiday), @link_params.merge(set_holiday: @this_date), method: :post %>
       <%else%>
-          <input type="button"
-                 onclick="location.href='<%=url_for(@link_params.merge(:del_holiday=>@this_date))%>'"
-                 value="<%=l(:wt_del_holiday)%>"
-          />
+          <%= button_to l(:wt_del_holiday), @link_params.merge(del_holiday: @this_date), method: :post %>
       <%end%>
   <%end%>
 </div>
@@ -61,7 +55,7 @@
         <input type="button" onclick="$(window).off('beforeunload'); window.onbeforeunload = null; submit();" value="<%= l(:wt_update) %>" />
         &#58;
         <input type="button"
-               onclick="location.href='<%=url_for(@link_params.merge(:ticket_del=>"closed"))%>'"
+               onclick="work_time_post('<%=url_for(@link_params.merge(:ticket_del=>"closed"))%>');"
                value="<%=l(:wt_delete_closed_tickets)%>"
         />
         <div id="add_ticket_area" style="display: inline-block;_display: inline;">
@@ -129,13 +123,11 @@ d = memo.day
 <%end%>
 </div>
 
+  <% if @this_uid == @crnt_uid %>
   <div id="memo-wiki-edit" hidden>
     <%
-      year = params["year"]
-      month = params["month"]
-      day = params["day"]
-      user_id = params["user"]
-      date = Date.new(year.to_i,month.to_i,day.to_i)
+      user_id = @this_uid
+      date = @this_date
       wday_name = l(:wt_week_day_names).split(',')
       memo=WtDailyMemo.where(["day=:d and user_id=:u",{:d=>date,:u=>user_id}]).first
       if memo then
@@ -148,6 +140,7 @@ d = memo.day
     <input type="button" onclick="$(window).off('beforeunload'); window.onbeforeunload = null; submit();" value="<%= l(:wt_update) %>" />
     <%= wikitoolbar_for 'work_time_memo' %>
   </div>
+  <% end %>
 <br/>
 
 <%if User.current.allowed_to?(:view_work_time_other_member, @project) then%>

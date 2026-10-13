@@ -12,12 +12,17 @@ api.total_relay do
   end
   api.array :issues_cost do
     @r_issue_cost.each do |issue,cost|
-      iss = Issue.find_by_id(issue)
+      iss = Issue.visible.find_by(id: issue)
       api.issue_cost do
         api.issue do
-	  api.id iss.id unless iss.nil?
-	  api.tracker(:id => iss.tracker.id, :name => iss.tracker.name) unless iss.tracker.nil?
-          api.subject iss.subject
+          if iss
+            api.id iss.id
+            api.tracker(:id => iss.tracker.id, :name => iss.tracker.name) if iss.tracker
+            api.subject iss.subject
+          else
+            api.id -1
+            api.subject 'PRIVATE'
+          end
         end
         api.cost cost[-1]
       end

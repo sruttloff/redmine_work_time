@@ -1,5 +1,7 @@
 <select onchange="JavaScript:if (this.value != '') {
         jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                 url:this.value,
                 data:{asynchronous:true, method:'get'},
                 success:function(response){
@@ -29,6 +31,8 @@
            size="8"
            onKeyPress="if(checkEnter(event)) {
                    jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                            url:'<%=url_for(:action=>'ajax_relay',:issue_id=>@issue_id)%>' +
                                    '&parent_id=' + $('#input_id_<%=@issue_id%>').val(),
                            data:{asynchronous:true, method:'get'},
@@ -42,6 +46,8 @@
     <input type="button"
            value="<%=l(:button_apply)%>"
            onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                    url:'<%=url_for(:action=>'ajax_relay',:issue_id=>@issue_id)%>' +
                            '&parent_id=' + $('#input_id_<%=@issue_id%>').val(),
                    data:{asynchronous:true, method:'get'},
@@ -55,6 +61,8 @@
 
 <a href="#"
    onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
            url: '<%=url_for(:action=>"ajax_relay", :issue_id=>@issue_id.to_s)%>',
            data: {asynchronous: true, method: 'get'},
            success: function (response) {

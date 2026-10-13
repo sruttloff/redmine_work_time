@@ -6,13 +6,15 @@
 
 <div class="<%=@relay_modified ? 'wt_modified' : ''%>">
   =>
-  <%=@parent_disp.html_safe%>
+  <%=@parent_disp%>
   <%
      if User.current.allowed_to?(:edit_work_time_total, @project)
        if @parent_disp != ''
   %>
           <a href="#"
              onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                      url: '<%=url_for(:action=>"ajax_relay_input", :issue_id=>@issue_id.to_s)%>',
                      data: {asynchronous: true, method: 'get'},
                      success: function (response) {
@@ -24,6 +26,8 @@
           </a>
           <a href="#"
              onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                      url:'<%=url_for(:action=>'ajax_relay',:issue_id=>@issue_id, :parent_id=>0)%>',
                      data:{asynchronous:true, method:'get'},
                      success: function(response) {
@@ -35,6 +39,8 @@
       <%else%>
           <a href="#"
              onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                      url: '<%=url_for(:action=>"ajax_relay_input", :issue_id=>@issue_id.to_s)%>',
                      data: {asynchronous: true, method: 'get'},
                      success: function (response) {

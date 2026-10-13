@@ -1,9 +1,25 @@
+function work_time_post(url) {
+  var form = document.createElement('form');
+  form.method = 'post';
+  form.action = url;
+  var csrf = document.querySelector('meta[name="csrf-token"]');
+  if (csrf) {
+    var input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'authenticity_token';
+    input.value = csrf.content;
+    form.appendChild(input);
+  }
+  document.body.appendChild(form);
+  form.submit();
+}
+
 function ticket_pos(url, issue, pos, max)
 {
   var new_pos = prompt("Destination No.", pos);
   if(new_pos != null) {
     if((new_pos>=1) && (new_pos<=max))
-      location.replace(url+"&ticket_pos="+issue+"_"+new_pos);
+      work_time_post(url+"&ticket_pos="+issue+"_"+new_pos);
     else 
       alert("Out of range!");
   }
@@ -14,7 +30,7 @@ function prj_pos(url, prj, pos, max)
   var new_pos = prompt("Destination No.", pos);
   if(new_pos != null) {
     if((new_pos>=1) && (new_pos<=max))
-      location.replace(url+"&prj_pos="+prj+"_"+new_pos);
+      work_time_post(url+"&prj_pos="+prj+"_"+new_pos);
     else 
       alert("Out of range!");
   }
@@ -25,7 +41,7 @@ function member_pos(url, user_id, pos, max)
   var new_pos = prompt("Distination No.", pos);
   if(new_pos != null) {
     if((new_pos>=1) && (new_pos<=max))
-      location.replace(url+"&member_pos="+user_id+"_"+new_pos);
+      work_time_post(url+"&member_pos="+user_id+"_"+new_pos);
     else 
       alert("Out of rnage!");
   }
@@ -33,9 +49,11 @@ function member_pos(url, user_id, pos, max)
 
 function set_ticket_relay_by_issue_relation(ajax_url) {
   $('[id^=ticket_relay_]').each(function(){
-    var issue_id = $(this).attr('id').replace(/.*([^_]+)$/, "$1");
+    var issue_id = $(this).attr('id').replace(/^ticket_relay_/, '');
     jQuery.ajax({
       url: ajax_url + '&issue_id=' + issue_id,
+      type: 'POST',
+      headers: {'X-CSRF-Token': $('meta[name="csrf-token"]').attr('content')},
       data:{asynchronous:true, method:'get'},
       success: function(response) {
         jQuery('#ticket_relay_'+issue_id).html(response);
@@ -58,6 +76,8 @@ function update_done_ratio(ajax_url, issue_id) {
   var done_ratio = $('#input_ratio'+issue_id).val();
   jQuery.ajax({
     url:ajax_url+"&issue_id="+issue_id+"&done_ratio="+done_ratio,
+    type: 'POST',
+    headers: {'X-CSRF-Token': $('meta[name="csrf-token"]').attr('content')},
     data:{asynchronous:true, method:'get'},
     success:function(response){
       jQuery('[name="done_ratio'+ issue_id+'"]').replaceWith(response);
@@ -81,6 +101,8 @@ function dup_ticket(ajax_url, insert_pos, id)
 {
   jQuery.ajax({
     url:ajax_url+"&add_issue="+id+"&count="+add_ticket_count,
+    type: 'POST',
+    headers: {'X-CSRF-Token': $('meta[name="csrf-token"]').attr('content')},
     data:{asynchronous:true, method:'get'},
     success:function(response){
       jQuery('#'+insert_pos).after(response);
@@ -91,9 +113,11 @@ function dup_ticket(ajax_url, insert_pos, id)
 
 function tickets_insert(ajax_url, tickets)
 {
-  for(i=0; i<tickets.length;i++) {
+  for(var i=0; i<tickets.length;i++) {
     jQuery.ajax({
       url:ajax_url+"&add_issue="+tickets[i]+"&count="+add_ticket_count,
+      type: 'POST',
+      headers: {'X-CSRF-Token': $('meta[name="csrf-token"]').attr('content')},
       data:{asynchronous:true, method:'get'},
       success:function(response){
         jQuery('#time_input_table_bottom').before(response);
@@ -140,7 +164,7 @@ function sumDayTimes() {
   dayInputs = document.getElementsByTagName("input");
   for (var i=0; i<dayInputs.length; i++) {
     // Consider only those with an id containing the strings 'time_entry' and 'hours'
-    if ((dayInputs[i].id.indexOf("time_entry") >= 0) && (dayInputs[i].id.indexOf("hours") >= 0)) {
+    if (/^(new_)?time_entry_.*_hours$/.test(dayInputs[i].id)) {
       var val = dayInputs[i].value;
       if (val) {
         var vals = val.match(/^([\d\.]+)$/);

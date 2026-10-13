@@ -1,10 +1,10 @@
-﻿<%if @add_issue then%>
+<%if @add_issue then%>
 <tr style="background:#ddf;" id="time_entry_pos<%=@add_issue_id%>_<%=@add_count%>">
   <td>
   <div style="position:relative;width:300px;">
     <%=@add_issue.project.name%>
     <br/>
-    <%= link_to(@issueHtml.html_safe, {:controller=>"issues", :action=>"show", :id=>@add_issue.id},
+    <%= link_to(wk_pretty_issue_name(@add_issue), {:controller=>"issues", :action=>"show", :id=>@add_issue.id},
                 :popup=>true, :class=>'wt_iss_link', :'data-issue'=>@add_issue.id) %>
     <%= print_issue_cost(@add_issue) %>
     <%if User.current.allowed_to?(:edit_issues, @add_issue.project)%>

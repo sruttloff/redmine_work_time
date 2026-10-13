@@ -15,6 +15,8 @@
 %>
 <a href="#"
    onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
            url: '<%=url1%>',
            data: {asynchronous: true, method: 'get'},
            success: function (response) {
@@ -31,6 +33,8 @@
 <div style="font-size:14px;">
 <input type="button"
        onclick="jQuery.ajax({
+               type: 'POST',
+               headers: {'X-CSRF-Token': jQuery('meta[name=csrf-token]').attr('content')},
                url:'<%=url_for(:action=>'ajax_relay', :issue_id=>@issue_id, :parent_id=>issue.id)%>',
                data:{asynchronous:true, method:'get'},
                success: function(response) {

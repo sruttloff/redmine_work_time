@@ -4,7 +4,7 @@ WorkTime adds daily time entry and monthly reports to Redmine. Users can record 
 
 This fork is maintained for Redmine 6.1 by **[SaaS-Secure.com, S. Ruttloff](https://www.saas-secure.com/)**. It is based on [WorkTime by Tomohisa Kusukawa and contributors](https://github.com/redmine-work-time/redmine_work_time).
 
-**Version: 0.4.4.** Validation environment: Redmine **6.1.2-stable**, Rails **7.2.3**, Ruby **3.3.7**, and MySQL **8.4.11**. The scope and limitations of the release checks are documented in the [validation report](doc/REDMINE_6_1_VALIDATION.md). Other Redmine versions and database adapters have not been validated for this fork. See [NEWS.md](NEWS.md) for release notes.
+**Version: 0.4.5.** Validation environment: Redmine **6.1.2-stable**, Rails **7.2.3**, Ruby **3.3.7**, and MySQL **8.4.11**. The scope and limitations of the release checks are documented in the [validation report](doc/REDMINE_6_1_VALIDATION.md). Other Redmine versions and database adapters have not been validated for this fork. See [NEWS.md](NEWS.md) for release notes.
 
 ## Features
 
@@ -31,7 +31,7 @@ Check out the desired published revision in Redmine's plugin directory. The dire
 
 ```sh
 cd /path/to/redmine/plugins
-git clone --branch v0.4.4 https://github.com/sruttloff/redmine_work_time.git redmine_work_time
+git clone --branch v0.4.5 https://github.com/sruttloff/redmine_work_time.git redmine_work_time
 cd /path/to/redmine
 bundle install
 bundle exec rake redmine:plugins:migrate NAME=redmine_work_time RAILS_ENV=production
@@ -45,7 +45,7 @@ bundle exec rake assets:precompile RAILS_ENV=production
 
 Then restart the Redmine application server using the command appropriate for your deployment, such as Puma under systemd, Passenger, or Docker.
 
-For an upgrade, back up the database and plugin directory, fetch and check out the desired release tag, and repeat the steps for gems, migrations, assets, and restarting the application. Version 0.4.4 introduces no new database migrations.
+For an upgrade, back up the database and plugin directory, fetch and check out the desired release tag, and repeat the steps for gems, migrations, assets, and restarting the application. Version 0.4.5 introduces no new database migrations.
 
 ## Setup
 
@@ -55,13 +55,13 @@ For an upgrade, back up the database and plugin directory, fetch and check out t
    | Permission | Purpose |
    | --- | --- |
    | View Work time tab (`view_work_time_tab`) | Access the project's WorkTime view |
-   | View other members' work time (`view_work_time_other_member`) | Select other members and access their reports |
+   | View other members' work time (`view_work_time_other_member`) | Select project members and access project reports |
    | Edit work time totals (`edit_work_time_total`) | Manage report member order, ticket relays, and the project accounting start day |
    | Edit other members' work time (`edit_work_time_other_member`) | Edit another member's time through WorkTime |
 
-3. Grant standard Redmine permissions such as **View issues**, **View spent time**, **Log spent time**, and the appropriate time entry editing permissions for each role. WorkTime permissions complement the standard Redmine permissions.
+3. Grant standard Redmine permissions such as **View issues**, **View spent time**, **Log spent time**, and the appropriate time entry editing permissions for each role. WorkTime permissions complement the standard Redmine permissions. Editing another member requires both WorkTime's `edit_work_time_other_member` and Redmine's `edit_time_entries`; creating a booking for another member also requires Redmine's `log_time_for_other_users`. Redmine's own-only time visibility remains effective in reports and exports.
 4. Under **Administration → Plugins → WorkTime → Configure**, choose whether the personal WorkTime link appears in the account menu.
-5. Users with `edit_work_time_total` and a standard permission that gives access to project settings (such as **Edit project**) can set the **Company start day** under **Project → Settings → WorkTime**. The default is `1`. Use `1` through `28` for periods that must work in every month; the inherited date calculation does not clamp days `29` through `31` to the end of shorter months.
+5. Users with `edit_work_time_total` and a standard permission that gives access to project settings (such as **Edit project**) can set the **Company start day** under **Project → Settings → WorkTime**. The default is `1`; values from `1` to `31` are supported. In shorter months, the start is clamped to the last day of that month. For example, a start day of `31` produces a period from February 28 (29 in a leap year) through March 30.
 
 ## Usage
 
@@ -86,14 +86,19 @@ Administrators can mark a selected date as a holiday or remove that marker. Holi
 
 ## Validation and development
 
+Version **0.4.5** resolves the authorization, escaping, CSV/API, date, and missing-record defects identified in the [0.4.4 review](doc/FUNCTIONAL_REVIEW_2026_10_13.md). See the [0.4.5 review and release validation](doc/REVIEW_0_4_5.md) for the corrections, tests, and upgrade implications. Explicit changes now require POST with CSRF protection; custom integrations that previously changed data via GET must be updated. The bundled interface handles this automatically.
+
 From a migrated development or test installation with at least one tracker, issue status, and time tracking activity:
 
 ```sh
 bundle exec rake zeitwerk:check
 bundle exec rails runner plugins/redmine_work_time/test/compatibility_smoke.rb
+bundle exec rails runner plugins/redmine_work_time/test/workflow_audit.rb
+bundle exec rails runner plugins/redmine_work_time/test/reload_smoke.rb
+node --check plugins/redmine_work_time/assets/javascripts/work_time.js
 ```
 
-The compatibility runner exercises real Rails requests, decimal CSV totals, ticket relay initialization, missing projects/issues, and the project settings tab. It uses temporary records inside a rolled-back transaction and disables mail delivery in its process. It refuses to run in production. See the [validation report](doc/REDMINE_6_1_VALIDATION.md) for the checks performed for this release.
+The compatibility runner covers 42 integration checks. The expanded workflow runner covers 54 authorization, mutation, CSRF, CSV/API, date, cycle, and custom-field checks. Both create temporary records inside rolled-back transactions and disable mail delivery in their process. They refuse to run in production. The reload runner checks three isolated WorkTime initialization cycles without changing the running application. See the [validation report](doc/REDMINE_6_1_VALIDATION.md) for the environment and limits of these checks.
 
 The inherited unit and controller tests can be run in a separate, prepared test database:
 

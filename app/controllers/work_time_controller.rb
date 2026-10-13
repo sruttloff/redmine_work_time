@@ -1,5 +1,10 @@
+require 'csv'
+require 'set'
+
 class WorkTimeController < ApplicationController
-  #  before_filter :find_project, :authorize
+  before_action :require_login
+  before_action :authorize_work_time_request
+  before_action :require_work_time_post
   accept_api_auth :relay_total
 
   helper :custom_fields
@@ -18,6 +23,7 @@ class WorkTimeController < ApplicationController
     hour_update
     make_pack
     update_daily_memo(params[:memo]) if params.key?(:memo)
+    Array(@work_time_audit_notes).each { |note| update_daily_memo(note, true) }
     set_holiday
     @custom_fields = TimeEntryCustomField.all
     @link_params.merge!(:action=>"index")
@@ -32,7 +38,7 @@ class WorkTimeController < ApplicationController
     @message = ""
     require_login || return
     find_project || return
-    authorize
+    authorize || return
     prepare_values
     if @this_user.nil? || !@this_user.allowed_to?(:view_work_time_tab, @project)
       @link_params.merge!(:action=>"relay_total")
@@ -46,6 +52,7 @@ class WorkTimeController < ApplicationController
     make_pack
     member_add_del_check
     update_daily_memo(params[:memo]) if params.key?(:memo)
+    Array(@work_time_audit_notes).each { |note| update_daily_memo(note, true) }
     set_holiday
     @custom_fields = TimeEntryCustomField.all
     @link_params.merge!(:action=>"show")
@@ -55,74 +62,44 @@ class WorkTimeController < ApplicationController
   end
 
   def member_monthly_data
-    require_login || return
-    if params.key?(:id) then
-      find_project || return
-    end
     prepare_values
     make_pack
-
-    csv_data = %Q|"user","date","project","ticket","spent time"\n|
-
+    rows = [['user', 'date', 'project', 'ticket', 'spent time']]
     (@first_date..@last_date).each do |date|
-      @month_pack[:odr_prjs].each do |prj_pack|
-        next if prj_pack[:count_issues] == 0
-        prj_pack[:odr_issues].each do |issue_pack|
-          next if issue_pack[:count_hours] == 0
+      @month_pack[:odr_prjs].each do |project_pack|
+        project_pack[:odr_issues].each do |issue_pack|
+          next if issue_pack[:count_hours].zero?
           issue = issue_pack[:issue]
-          if issue_pack[:total_by_day][date] then
-            csv_data << %Q|"#{@this_user}","#{date}","#{issue.project}","##{issue.id} #{issue.subject}",#{issue_pack[:total_by_day][date]}\n|
-          end
+          rows << [@this_user.to_s, date, issue.project.to_s, "##{issue.id} #{issue.subject}",
+                   issue_pack[:total_by_day][date]]
         end
       end
-      if @month_pack[:other_by_day].has_key?(date) then
-        csv_data << %Q|"#{@this_user}","#{date}","PRIVATE","PRIVATE",#{@month_pack[:other_by_day][date]}\n|
+      if @month_pack[:other_by_day].key?(date)
+        rows << [@this_user.to_s, date, 'PRIVATE', 'PRIVATE', @month_pack[:other_by_day][date]]
       end
     end
-    send_data Redmine::CodesetUtil.from_utf8(csv_data, l(:general_csv_encoding)), :type=>"text/csv", :filename=>"member_monthly.csv"
+    send_work_time_csv(rows, 'member_monthly.csv')
   end
 
   def member_monthly_data_table
-    require_login || return
-    if params.key?(:id) then
-      find_project || return
-    end
     prepare_values
     make_pack
-
-    csv_data = %Q|""|
-    (@first_date..@last_date).each do |date|
-      csv_data << %Q|,"#{date}"|
-    end
-    csv_data << "\n"
-    
-    @month_pack[:odr_prjs].each do |prj_pack|
-      next if prj_pack[:count_issues] == 0
-      prj_pack[:odr_issues].each do |issue_pack|
-        next if issue_pack[:count_hours] == 0
+    dates = (@first_date..@last_date).to_a
+    rows = [[''] + dates]
+    @month_pack[:odr_prjs].each do |project_pack|
+      project_pack[:odr_issues].each do |issue_pack|
+        next if issue_pack[:count_hours].zero?
         issue = issue_pack[:issue]
-        
-        csv_data << %Q|"##{issue.id} #{issue.subject}"|
-        
-        (@first_date..@last_date).each do |date|
-          if issue_pack[:total_by_day].has_key?(date) then
-            csv_data << %Q|,"#{issue_pack[:total_by_day][date]}"|
-          else
-            csv_data << %Q|,""|
-          end
-        end
-        
-        csv_data << "\n"
+        rows << ["##{issue.id} #{issue.subject}"] + dates.map { |date| issue_pack[:total_by_day][date] }
       end
     end
-
-    send_data Redmine::CodesetUtil.from_utf8(csv_data, l(:general_csv_encoding)), :type=>"text/csv", :filename=>"member_monthly_table.csv"
+    send_work_time_csv(rows, 'member_monthly_table.csv')
   end
 
   def total
     @message = ""
     find_project || return
-    authorize
+    authorize || return
     prepare_values
     change_member_position
     change_ticket_position
@@ -133,113 +110,23 @@ class WorkTimeController < ApplicationController
   end
 
   def total_data
-    find_project || return
-    authorize
     prepare_values
-    change_member_position
-    change_ticket_position
-    change_project_position
     member_add_del_check
     calc_total
-    
-    csv_data = %Q|"user","relayed project","relayed ticket","project","ticket","spent time"\n|
-    #-------------------------------------- メンバーのループ
-    @members.each do |mem_info|
-      user = mem_info[1]
-
-      #-------------------------------------- プロジェクトのループ
-      prjs = WtProjectOrders.where("uid=-1").
-          order("dsp_pos").
-          all
-      prjs.each do |po|
-        dsp_prj = po.dsp_prj
-        dsp_pos = po.dsp_pos
-        next unless @prj_cost.key?(dsp_prj) # 値の無いプロジェクトはパス
-        next unless @prj_cost[dsp_prj].key?(-1) # 値の無いプロジェクトはパス
-        next if @prj_cost[dsp_prj][-1] == 0 # 値の無いプロジェクトはスパ
-        prj =Project.find_by_id(dsp_prj)
-        
-        #-------------------------------------- チケットのループ
-        tickets = WtTicketRelay.order("position").all
-        tickets.each do |tic|
-          issue_id = tic.issue_id
-          next unless @issue_cost.key?(issue_id) # 値の無いチケットはパス
-          next unless @issue_cost[issue_id].key?(-1) # 値の無いチケットはパス
-          next if @issue_cost[issue_id][-1] == 0 # 値の無いチケットはパス
-          next unless @issue_cost[issue_id].key?(user.id) # 値の無いチケットはパス
-          next if @issue_cost[issue_id][user.id] == 0 # 値の無いチケットはパス
-
-          issue = Issue.find_by_id(issue_id)
-          next if issue.nil? # チケットが削除されていたらパス
-          next if issue.project_id != dsp_prj # このプロジェクトに表示するチケットでない場合はパス
-
-          parent_issue = Issue.find_by_id(@issue_parent[issue_id])
-          next if parent_issue.nil? # チケットが削除されていたらパス
-
-          csv_data << %Q|"#{user}","#{parent_issue.project}","##{parent_issue.id} #{parent_issue.subject}",|
-          csv_data << %Q|"#{prj}","##{issue.id} #{issue.subject}",#{@issue_cost[issue_id][user.id]}\n|
-        end
-      end
-      if @issue_cost.has_key?(-1) && @issue_cost[-1].has_key?(user.id) then
-        csv_data << %Q|"#{user}","private","private","private","private",#{@issue_cost[-1][user.id]}\n|
-      end
-    end
-    send_data Redmine::CodesetUtil.from_utf8(csv_data, l(:general_csv_encoding)), :type=>"text/csv", :filename=>"monthly_report_raw.csv"
+    export_project_csv(relayed: false, activities: false)
   end
 
   def total_data_with_act
-    find_project || return
-    authorize
     prepare_values
-    change_member_position
-    change_ticket_position
-    change_project_position
     member_add_del_check
     calc_total
-
-    csv_data = %Q|"user","relayed project","relayed ticket","project","ticket","activity","spent time"\n|
-    @issue_act_cost.each do |issue_id, user_act_cost|
-      if issue_id >0
-        issue = Issue.find_by_id(issue_id)
-        next if issue.nil? # チケットが削除されていたらパス
-
-        parent_issue = Issue.find_by_id(@issue_parent[issue_id])
-        next if parent_issue.nil? # チケットが削除されていたらパス
-
-        prj = issue.project
-
-        user_act_cost.each do |user_id, act_cost|
-          user = User.find_by_id(user_id)
-          act_cost.each do |act_id, cost|
-            act = TimeEntryActivity.find_by_id(act_id)
-            unless act.nil?
-              csv_data << %Q|"#{user}","#{parent_issue.project}","##{parent_issue.id} #{parent_issue.subject}",|
-              csv_data << %Q|"#{prj}","##{issue.id} #{issue.subject}","#{act.name}",|
-              csv_data << %Q|#{cost}\n|
-            else # can not find activity
-              csv_data << %Q|"#{user}","#{parent_issue.project}","##{parent_issue.id} #{parent_issue.subject}",|
-              csv_data << %Q|"#{prj}","##{issue.id} #{issue.subject}","nil",|
-              csv_data << %Q|#{cost}\n|
-            end
-          end
-        end
-      else # 表示権限の無い工数があった場合
-        user_act_cost.each do |user_id, act_cost|
-          user = User.find_by_id(user_id)
-          act_cost.each do |act_id, cost|
-            csv_data << %Q|"#{user}","private","private","private","private","private",|
-            csv_data << %Q|#{cost}\n|
-          end
-        end
-      end
-    end
-    send_data Redmine::CodesetUtil.from_utf8(csv_data, l(:general_csv_encoding)), :type=>"text/csv", :filename=>"monthly_report_raw_with_act.csv"
+    export_project_csv(relayed: false, activities: true)
   end
 
   def edit_relay
     @message = ""
     find_project || return
-    authorize
+    authorize || return
     prepare_values
     change_member_position
     change_ticket_position
@@ -252,7 +139,7 @@ class WorkTimeController < ApplicationController
   def relay_total
     @message = ""
     find_project || return
-    authorize
+    authorize || return
     prepare_values
     change_member_position
     change_ticket_position
@@ -268,186 +155,96 @@ class WorkTimeController < ApplicationController
   end
 
   def relay_total_data
-    find_project || return
-    authorize
     prepare_values
-    change_member_position
-    change_ticket_position
-    change_project_position
     member_add_del_check
     calc_total
-    
-    csv_data = %Q|"user","project","ticket","spent time"\n|
-    #-------------------------------------- メンバーのループ
-    @members.each do |mem_info|
-      user = mem_info[1]
-
-      #-------------------------------------- プロジェクトのループ
-      prjs = WtProjectOrders.where("uid=-1").
-          order("dsp_pos").
-          all
-      prjs.each do |po|
-        dsp_prj = po.dsp_prj
-        dsp_pos = po.dsp_pos
-        next unless @r_prj_cost.key?(dsp_prj) # 値の無いプロジェクトはパス
-        next unless @r_prj_cost[dsp_prj].key?(-1) # 値の無いプロジェクトはパス
-        next if @r_prj_cost[dsp_prj][-1] == 0 # 値の無いプロジェクトはスパ
-        prj =Project.find_by_id(dsp_prj)
-        
-        #-------------------------------------- チケットのループ
-        tickets = WtTicketRelay.order("position").all
-        tickets.each do |tic|
-          issue_id = tic.issue_id
-          next unless @r_issue_cost.key?(issue_id) # 値の無いチケットはパス
-          next unless @r_issue_cost[issue_id].key?(-1) # 値の無いチケットはパス
-          next if @r_issue_cost[issue_id][-1] == 0 # 値の無いチケットはパス
-          next unless @r_issue_cost[issue_id].key?(user.id) # 値の無いチケットはパス
-          next if @r_issue_cost[issue_id][user.id] == 0 # 値の無いチケットはパス
-
-          issue = Issue.find_by_id(issue_id)
-          next if issue.nil? # チケットが削除されていたらパス
-          next if issue.project_id != dsp_prj # このプロジェクトに表示するチケットでない場合はパス
-
-          csv_data << %Q|"#{user}","#{prj}","##{issue.id} #{issue.subject}",#{@r_issue_cost[issue_id][user.id]}\n|
-        end
-      end
-      if @r_issue_cost.has_key?(-1) && @r_issue_cost[-1].has_key?(user.id) then
-        csv_data << %Q|"#{user}","private","private",#{@r_issue_cost[-1][user.id]}\n|
-      end
-    end
-    send_data Redmine::CodesetUtil.from_utf8(csv_data, l(:general_csv_encoding)), :type=>"text/csv", :filename=>"monthly_report.csv"
+    export_project_csv(relayed: true, activities: false)
   end
 
   def relay_total_data_with_act
-    find_project || return
-    authorize
     prepare_values
-    change_member_position
-    change_ticket_position
-    change_project_position
     member_add_del_check
     calc_total
-
-    csv_data = %Q|"user","project","ticket","activity","spent time"\n|
-    @r_issue_act_cost.each do |issue_id, user_act_cost|
-      if issue_id >0
-        issue = Issue.find_by_id(issue_id)
-        next if issue.nil?
-        prj = issue.project
-
-        user_act_cost.each do |user_id, act_cost|
-          user = User.find_by_id(user_id)
-          act_cost.each do |act_id, cost|
-            act = TimeEntryActivity.find_by_id(act_id)
-            unless act.nil?
-              csv_data << %Q|"#{user}","#{prj}","##{issue.id} #{issue.subject}",|
-              csv_data << %Q|"#{act.name}",#{cost}\n|
-            else # can not find activity
-              csv_data << %Q|"#{user}","#{prj}","##{issue.id} #{issue.subject}",|
-              csv_data << %Q|"nil",#{cost}\n|
-            end
-          end
-        end
-      else # 表示権限の無い工数があった場合
-        user_act_cost.each do |user_id, act_cost|
-          user = User.find_by_id(user_id)
-          act_cost.each do |act_id, cost|
-            csv_data << %Q|"#{user}","private","private",|
-            csv_data << %Q|"private",#{cost}\n|
-          end
-        end
-      end
-    end
-    send_data Redmine::CodesetUtil.from_utf8(csv_data, l(:general_csv_encoding)), :type=>"text/csv", :filename=>"monthly_report_with_act.csv"
+    export_project_csv(relayed: true, activities: true)
   end
 
   def ajax_relay
-    if !params.key?(:issue_id)
-      render :layout=>false, :plain=>'ERROR: no issue_id'
+    unless params.key?(:issue_id)
+      render plain: 'ERROR: no issue_id', layout: false
       return
     end
-    @issue_id = params[:issue_id].to_i
-
-    find_project || return
-    @message = ''
-    @parent_disp = ''
-    @relay_modified = false
-
+    issue = visible_work_time_issue!(params[:issue_id])
+    @issue_id = issue.id
+    @message, @parent_disp, @relay_modified = '', '', false
     if params.key?(:parent_id)
-      @parent_id = params[:parent_id].to_i
-      if @parent_id >= 0
-        update_relay @issue_id, @parent_id
-      else
-        # parent_id == -1 by set_ticket_relay_by_issue_relation
-        redmine_parent_id = Issue.find_by_id(@issue_id).parent_id
-        if redmine_parent_id && redmine_parent_id >= 1 # has parent
-          update_relay @issue_id, redmine_parent_id
-        end
+      unless User.current.allowed_to?(:edit_work_time_total, issue.project)
+        render_403
+        return
       end
+      parent_id = params[:parent_id].to_i
+      parent_id = issue.parent_id.to_i if parent_id == -1
+      visible_work_time_issue!(parent_id) if parent_id.positive?
+      update_relay(issue.id, parent_id)
     end
-    relay = WtTicketRelay.where(["issue_id=:i",{:i=>@issue_id}]).first
-    @parent_id = relay ? relay.parent : 0 # no relay stored for this issue yet
-
-    if @parent_id != 0 && !((parent = Issue.find_by_id(@parent_id)).nil?) then
-      @parent_disp = parent.closed? ? '<del>'+parent.to_s+'</del>' : parent.to_s
+    @parent_id = WtTicketRelay.find_by(issue_id: issue.id)&.parent.to_i
+    parent = Issue.visible.find_by(id: @parent_id)
+    if parent && can_view_work_time_project?(parent.project)
+      @parent_disp = helpers.wk_pretty_issue_name(parent)
+    else
+      @parent_id = 0
     end
-    render :layout=>false
+    render layout: false
   end
 
   def update_relay(issue_id, parent_id)
-    if !User.current.allowed_to?(:edit_work_time_total, @project)
-      @message ||= ''
-      @message += l(:wt_no_permission)
-      return
-    end
-
-    # loop relay check
-    route = ''
+    raise ActionController::BadRequest, 'Invalid relay target' if parent_id.negative?
+    seen = Set.new([issue_id])
     search_id = parent_id
-    while search_id != 0 do
-      route += "->#{search_id}"
-      if search_id == issue_id
-        @message ||= ''
-        @message += l(:wt_loop_relay)+route
+    while search_id.positive?
+      if seen.include?(search_id)
+        @message = l(:wt_loop_relay)
         return
       end
-      relay = WtTicketRelay.where(["issue_id=:i",{:i=>search_id}]).first
-      break if !relay
-      search_id = relay.parent
+      seen.add(search_id)
+      search_id = WtTicketRelay.find_by(issue_id: search_id)&.parent.to_i
     end
+    relay = WtTicketRelay.find_or_initialize_by(issue_id: issue_id)
+    relay.position ||= WtTicketRelay.maximum(:position).to_i + 1
+    relay.parent = parent_id
+    relay.save!
+    @relay_modified = true
+  end
+  private :update_relay
 
-    relay = WtTicketRelay.where(["issue_id=:i",{:i=>issue_id}]).first
-    if relay then
-      relay.parent = parent_id
-      relay.save
-      @relay_modified = true
-    else
-      @message ||= ''
-      @message += "Internal Error: no WtTicketRelay for ##{issue_id}"
+  def ajax_relay_input
+    issue = visible_work_time_issue!(params[:issue_id])
+    unless User.current.allowed_to?(:edit_work_time_total, issue.project)
+      render_403
+      return
     end
+    @issue_id = issue.id
+    @projects = Project.visible.joins('INNER JOIN wt_project_orders ON wt_project_orders.dsp_prj=projects.id AND wt_project_orders.uid=-1').
+      select('projects.*, wt_project_orders.dsp_pos as pos').order('pos').to_a.
+      select { |project| can_view_work_time_project?(project) }
+    render layout: false
   end
 
-  def ajax_relay_input # チケット選択の内容を返すアクション
-    @issue_id = params[:issue_id]
-    @projects = Project.joins("INNER JOIN wt_project_orders ON wt_project_orders.dsp_prj=projects.id AND wt_project_orders.uid=-1").
-        select("projects.*, wt_project_orders.dsp_pos as pos").
-        order("pos").
-        all
-    render(:layout=>false)
-  end
-
-  def ajax_relay_input_select # チケット選択ウィンドウにAjaxで挿入(Update)される内容を返すアクション
-    @issue_id = params[:issue_id]
-    @issues = Issue.includes(:assigned_to).
-        where(["project_id=:p",{:p=>params[:prj]}]).
-        order("id DESC").
-        all
-    render(:layout=>false)
+  def ajax_relay_input_select
+    issue = visible_work_time_issue!(params[:issue_id])
+    unless User.current.allowed_to?(:edit_work_time_total, issue.project)
+      render_403
+      return
+    end
+    @issue_id = issue.id
+    project = Project.visible.find(params[:prj])
+    raise ActiveRecord::RecordNotFound unless can_view_work_time_project?(project)
+    @issues = Issue.visible.includes(:assigned_to).where(project_id: project.id).order(id: :desc)
+    render layout: false
   end
 
   def ajax_add_tickets_input
     prepare_values
-    @select_projects = Project.
+    @select_projects = Project.visible.
         joins("LEFT JOIN wt_project_orders ON wt_project_orders.dsp_prj=projects.id AND wt_project_orders.uid=#{User.current.id}").
         select("projects.*, coalesce(wt_project_orders.dsp_pos,100000) as pos").
         order("pos,name").
@@ -457,7 +254,9 @@ class WorkTimeController < ApplicationController
 
   def ajax_add_tickets_input_select # 複数チケット選択ウィンドウにAjaxで挿入(Update)される内容を返すアクション
     prepare_values
-    @issues = Issue.
+    project = Project.visible.find(params[:prj])
+    raise ActiveRecord::RecordNotFound unless can_view_work_time_project?(project)
+    @issues = Issue.visible.
         includes(:assigned_to).
         where(["project_id=:p",{:p=>params[:prj]}]).
         order("id DESC").
@@ -469,21 +268,15 @@ class WorkTimeController < ApplicationController
   def ajax_add_tickets_insert # 日毎工数に挿入するAjaxアクション
     prepare_values
 
-    uid = params[:user]
-    @add_issue_id = params[:add_issue]
-    @add_count = params[:count]
+    uid = @this_uid
+    @add_issue_id = params[:add_issue].to_i.to_s
+    @add_count = params[:count].to_i.to_s
     if @this_uid==@crnt_uid then
-      add_issue = Issue.find_by_id(@add_issue_id)
+      add_issue = Issue.visible.find_by(id: @add_issue_id)
       if add_issue && add_issue.visible? then
         @add_issue_children_cnt = Issue.where(["parent_id = ?", add_issue.id.to_s]).count
         prj = add_issue.project
-        if User.current.allowed_to?(:log_time, prj) then
-          if add_issue.closed? then
-            @issueHtml = "<del>"+add_issue.to_s+"</del>"
-          else
-            @issueHtml = add_issue.to_s
-          end
-
+        if can_view_work_time_project?(prj) && User.current.allowed_to?(:log_time, prj) then
           @activities = []
           @activity_default = nil
           prj.activities.each do |act|
@@ -492,17 +285,6 @@ class WorkTimeController < ApplicationController
           end
 
           @custom_fields = TimeEntryCustomField.all
-          @custom_fields.each do |cf|
-            def cf.custom_field
-              return self
-            end
-            def cf.value
-              return self.default_value
-            end
-            def cf.true?
-              return self.default_value
-            end
-          end
 
           @add_issue = add_issue
 
@@ -519,43 +301,39 @@ class WorkTimeController < ApplicationController
     render(:layout=>false)
   end
 
-  def ajax_done_ratio_input # 進捗％更新ポップアップ
+  def ajax_done_ratio_input
     prepare_values
-    issue_id = params[:issue_id]
-    @issue = Issue.find_by_id(issue_id)
-    if @issue.nil? || @issue.closed? || !@issue.visible? then
-      @issueHtml = "<del>"+@issue.to_s+"</del>"
-    else
-      @issueHtml = @issue.to_s
+    @issue = visible_work_time_issue!(params[:issue_id])
+    unless !@issue.closed? && User.current.allowed_to?(:edit_issues, @issue.project)
+      render_403
+      return
     end
-    render(:layout=>false)
+    render layout: false
   end
 
   def ajax_done_ratio_update
     prepare_values
-    issue_id = params[:issue_id]
-    done_ratio = params[:done_ratio]
-    @issue = Issue.find_by_id(issue_id)
-    if User.current.allowed_to?(:edit_issues, @issue.project) then
-      @issue.init_journal(User.current)
-      @issue.done_ratio = done_ratio
-      @issue.save
+    @issue = visible_work_time_issue!(params[:issue_id])
+    unless !@issue.closed? && User.current.allowed_to?(:edit_issues, @issue.project)
+      render_403
+      return
     end
-    render(:layout=>false)
+    ratio = Integer(params[:done_ratio], exception: false)
+    raise ActionController::BadRequest, 'Invalid progress value' unless ratio && (0..100).cover?(ratio)
+    @issue.init_journal(User.current)
+    @issue.safe_attributes = {'done_ratio' => ratio.to_s}
+    @issue.save!
+    render layout: false
   end
 
   def register_project_settings
-    @message = ""
-    require_login || return
-    find_project || return
-    authorize
-    @settings = Setting.plugin_redmine_work_time
-    @settings = Hash.new unless @settings.is_a?(Hash)
-    @settings['account_start_days'] = Hash.new unless @settings['account_start_days'].is_a?(Hash)
-    @settings['account_start_days'][@project.id.to_s] = params['account_start_day']
-    Setting.plugin_redmine_work_time = @settings
-    redirect_to :controller => 'projects',
-                :action => 'settings', :id => @project, :tab => 'work_time'
+    day = Integer(params[:account_start_day], exception: false)
+    raise ActionController::BadRequest, 'Invalid accounting start day' unless day && (1..31).cover?(day)
+    settings = Setting.plugin_redmine_work_time.deep_dup
+    settings['account_start_days'] ||= {}
+    settings['account_start_days'][@project.id.to_s] = day.to_s
+    Setting.plugin_redmine_work_time = settings
+    redirect_to controller: 'projects', action: 'settings', id: @project, tab: 'work_time'
   end
 
 private
@@ -568,51 +346,45 @@ private
   end
 
   def prepare_values
-    # ************************************* 値の準備
     @crnt_uid = User.current.id
-    @this_uid = (params.key?(:user) && User.current.allowed_to?(:view_work_time_other_member, @project)) ? params[:user].to_i : @crnt_uid
-    @this_user = User.find_by_id(@this_uid)
-
-    if @project &&
-      Setting.plugin_redmine_work_time.is_a?(Hash) &&
-      Setting.plugin_redmine_work_time['account_start_days'].is_a?(Hash) &&
-      Setting.plugin_redmine_work_time['account_start_days'].has_key?(@project.id.to_s)
-        @account_start_day = Setting.plugin_redmine_work_time['account_start_days'][@project.id.to_s].to_i
-    else
-      @account_start_day = 1
+    @this_uid = params[:user].present? ? params[:user].to_i : @crnt_uid
+    @this_user = User.find(@this_uid)
+    if @this_uid != @crnt_uid
+      unless @project && User.current.allowed_to?(:view_work_time_other_member, @project) &&
+             @project.users.exists?(@this_uid) && @this_user.allowed_to?(:view_work_time_tab, @project)
+        raise ActiveRecord::RecordNotFound
+      end
     end
-
-    @today = Date.today
-    year = params.key?(:year) ? params[:year].to_i : @today.year
-    month = params.key?(:month) ? params[:month].to_i : @today.month
-    day = params.key?(:day) ? params[:day].to_i : @today.day
-    @this_date = Date.new(year, month, day)
-    display_date = @this_date
-    display_date <<= 1 if day < @account_start_day
-    @display_year = display_date.year
-    @display_month = display_date.month
-
-    @last_month = @this_date << 1
-    @next_month = @this_date >> 1
-
-    @restrict_project = (params.key?(:prj) && params[:prj].to_i > 0) ? params[:prj].to_i : false
-
-    @first_date = Date.new(@display_year, @display_month, @account_start_day)
-    @last_date = (@first_date >> 1) - 1
-
+    configured_day = Setting.plugin_redmine_work_time.dig('account_start_days', @project&.id.to_s).to_i
+    @account_start_day = (1..31).cover?(configured_day) ? configured_day : 1
+    today = Date.current
+    year = params.key?(:year) ? params[:year].to_i : today.year
+    month = params.key?(:month) ? params[:month].to_i : today.month
+    day = params.key?(:day) ? params[:day].to_i : today.day
+    begin
+      raise Date::Error unless (1..9999).cover?(year)
+      @this_date = Date.new(year, month, day)
+    rescue Date::Error
+      raise ActionController::BadRequest, 'Invalid report date'
+    end
+    first = accounting_period_start(@this_date.beginning_of_month)
+    first = accounting_period_start(@this_date.beginning_of_month.prev_month) if @this_date < first
+    @first_date = first
+    @last_date = accounting_period_start(first.beginning_of_month.next_month) - 1
+    @display_year, @display_month = first.year, first.month
+    @last_month, @next_month = @this_date.prev_month, @this_date.next_month
+    @restrict_project = false
+    if params[:prj].to_i > 0
+      project = Project.visible.find(params[:prj])
+      raise ActiveRecord::RecordNotFound unless can_view_work_time_project?(project)
+      @restrict_project = project.id
+    end
     @month_names = l(:wt_month_names).split(',')
     @wday_name = l(:wt_week_day_names).split(',')
-    @wday_color = ["#faa", "#eee", "#eee", "#eee", "#eee", "#eee", "#aaf"]
-
-    @link_params = {:controller=>"work_time", :id=>@project,
-                    :year=>year, :month=>month, :day=>day,
-                    :user=>@this_uid, :prj=>@restrict_project}
-    @is_registerd_backlog = false
-    begin
-      Redmine::Plugin.find :redmine_backlogs
-      @is_registerd_backlog = true
-    rescue Exception => exception
-    end
+    @wday_color = ['#faa', '#eee', '#eee', '#eee', '#eee', '#eee', '#aaf']
+    @link_params = {controller: 'work_time', id: @project, year: year, month: month, day: day,
+                    user: @this_uid, prj: @restrict_project}
+    @is_registerd_backlog = Redmine::Plugin.installed?(:redmine_backlogs)
   end
 
   def ticket_pos
@@ -629,6 +401,8 @@ private
     if params.key?("ticket_pos") && params[:ticket_pos] =~ /^(.*)_(.*)$/ then
       tid = $1.to_i
       dst = $2.to_i
+      visible_work_time_issue!(tid)
+      raise ActionController::BadRequest, 'Invalid display position' unless dst.positive?
       src = UserIssueMonth.where(["uid=:u and issue=:i", {:u=>@this_uid,:i=>tid}]).first
       if src then # ポジション変更の場合
         if src.odr > dst then # チケットを前にもっていく場合
@@ -675,6 +449,9 @@ private
     if params.key?("prj_pos") && params[:prj_pos] =~ /^(.*)_(.*)$/ then
       tid = $1.to_i
       dst = $2.to_i
+      project = Project.visible.find(tid)
+      raise ActiveRecord::RecordNotFound unless can_view_work_time_project?(project)
+      raise ActionController::BadRequest, 'Invalid display position' unless dst.positive?
       src = WtProjectOrders.
           where(["uid=:u and dsp_prj=:d",{:u=>@this_uid, :d=>tid}]).
           first
@@ -743,91 +520,65 @@ private
     end
   end
 
-  def hour_update # *********************************** 工数更新要求の処理
-    by_other = false
-    if @this_uid != @crnt_uid
-      if User.current.allowed_to?(:edit_work_time_other_member, @project)
-        by_other = true
+  def hour_update
+    return unless request.post?
+    by_other = @this_uid != @crnt_uid
+    return if by_other && !User.current.allowed_to?(:edit_work_time_other_member, @project)
+
+    (params[:new_time_entry] || {}).each do |issue_id, entries|
+      issue = visible_work_time_issue!(issue_id)
+      next if @restrict_project && issue.project_id != @restrict_project
+      entries.each do |count, values|
+        if values[:hours].present?
+          next unless User.current.allowed_to?(:log_time, issue.project)
+          next if by_other && !User.current.allowed_to?(:log_time_for_other_users, issue.project)
+          attributes = values.slice('hours', 'activity_id', 'comments')
+          extra = params["new_time_entry_#{issue_id}_#{count}"]
+          attributes['custom_field_values'] = extra['custom_field_values'] if extra&.key?('custom_field_values')
+          entry = TimeEntry.new(project: issue.project, issue: issue, author: User.current,
+                                user: @this_user, spent_on: @this_date)
+          entry.safe_attributes = attributes
+          if entry.save && by_other
+            record_work_time_audit("add time entry of ##{issue.id}: #{entry.hours.to_f}h")
+          end
+          append_error_message_html(@message, hour_update_check_error(entry, issue.id))
+        end
+        if values[:remaining_hours].present? || values[:status_id].to_s.start_with?('M')
+          append_error_message_html(@message, issue_update_to_remain_and_more(issue.id, values))
+        end
+      end
+    end
+
+    (params[:time_entry] || {}).each do |id, values|
+      entry = authorized_time_entry!(id)
+      attributes = values.slice('hours', 'activity_id', 'comments')
+      extra = params["time_entry_#{id}"]
+      attributes['custom_field_values'] = extra['custom_field_values'] if extra&.key?('custom_field_values')
+      previous_hours = entry.hours.to_f
+      if attributes.key?('hours') && attributes['hours'].blank?
+        entry.destroy!
+        record_work_time_audit("delete time entry of ##{entry.issue_id}: -#{previous_hours}h-") if by_other
       else
-        return
+        entry.safe_attributes = attributes
+        if entry.save && by_other && entry.hours.to_f != previous_hours
+          record_work_time_audit("update time entry of ##{entry.issue_id}: -#{previous_hours}h- #{entry.hours.to_f}h")
+        end
+        append_error_message_html(@message, hour_update_check_error(entry, entry.issue_id))
+      end
+      if values[:remaining_hours].present? || values[:status_id].to_s.start_with?('M')
+        append_error_message_html(@message, issue_update_to_remain_and_more(entry.issue_id, values))
       end
     end
+  end
 
-    # 新規工数の登録
-    if params["new_time_entry"] then
-      params["new_time_entry"].each do |issue_id, valss|
-        issue = Issue.find_by_id(issue_id)
-        next if issue.nil? || !issue.visible?
-        next if !User.current.allowed_to?(:log_time, issue.project)
-        valss.each do |count, vals|
-          tm_vals = vals.except "remaining_hours", "status_id"
-          if params.has_key?("new_time_entry_#{issue_id}_#{count}")
-            params["new_time_entry_#{issue_id}_#{count}"].each do |k, v|
-              tm_vals[k] = v
-            end
-          end
-          next if tm_vals["hours"].blank? && vals["remaining_hours"].blank? && vals["status_id"].blank?
-          if tm_vals["hours"].present? then
-            if !tm_vals[:activity_id] then
-              append_error_message_html(@message, 'Error: Issue'+issue_id+': No Activities!')
-              next
-            end
-            if by_other
-              append_text = "\n[#{Time.now.localtime.strftime("%Y-%m-%d %H:%M")}] #{User.current.to_s}"
-              append_text += " add time entry of ##{issue.id.to_s}: #{tm_vals[:hours].to_f}h"
-              update_daily_memo(append_text, true)
-            end
-            new_entry = TimeEntry.new(:project => issue.project, :issue => issue, :author => User.current, :user => @this_user, :spent_on => @this_date)
-            new_entry.safe_attributes = tm_vals
-            new_entry.save
-            append_error_message_html(@message, hour_update_check_error(new_entry, issue_id))
-          end
-          if vals["remaining_hours"].present? || vals["status_id"].present? then
-            append_error_message_html(@message, issue_update_to_remain_and_more(issue_id, vals))
-          end
-        end
-      end
-    end
-
-    # 既存工数の更新
-    if params["time_entry"] then
-      params["time_entry"].each do |id, vals|
-        tm = TimeEntry.find_by_id(id)
-        issue_id = tm.issue.id
-        tm_vals = vals.except "remaining_hours", "status_id"
-        if params.has_key?("time_entry_"+id.to_s)
-          params["time_entry_"+id.to_s].each do |k,v|
-            tm_vals[k] = v
-          end
-        end
-        if tm_vals["hours"].blank? then
-          # 工数指定が空文字の場合は工数項目を削除
-          if by_other
-            append_text = "\n[#{Time.now.localtime.strftime("%Y-%m-%d %H:%M")}] #{User.current.to_s}"
-            append_text += " delete time entry of ##{issue_id.to_s}: -#{tm.hours.to_f}h-"
-            update_daily_memo(append_text, true)
-          end
-          tm.destroy
-        else
-          if by_other && tm_vals.key?(:hours) && tm.hours.to_f != tm_vals[:hours].to_f
-            append_text = "\n[#{Time.now.localtime.strftime("%Y-%m-%d %H:%M")}] #{User.current.to_s}"
-            append_text += " update time entry of ##{issue_id.to_s}: -#{tm.hours.to_f}h- #{tm_vals[:hours].to_f}h"
-            update_daily_memo(append_text, true)
-          end
-          tm.safe_attributes = tm_vals
-          tm.save
-          append_error_message_html(@message, hour_update_check_error(tm, issue_id))
-        end
-        if vals["remaining_hours"].present? || vals["status_id"].present? then
-          append_error_message_html(@message, issue_update_to_remain_and_more(issue_id, vals))
-        end
-      end
-    end
+  def record_work_time_audit(text)
+    (@work_time_audit_notes ||= []) << "\n[#{Time.current.strftime('%Y-%m-%d %H:%M')}] #{User.current} #{text}"
   end
 
   def issue_update_to_remain_and_more(issue_id, vals)
     issue = Issue.find_by_id(issue_id)
     return 'Error: Issue'+issue_id+': Private!' if issue.nil? || !issue.visible?
+    return unless User.current.allowed_to?(:edit_issues, issue.project)
     return if vals["remaining_hours"].blank? && vals["status_id"].blank?
     journal = issue.init_journal(User.current)
     # update "0.0" is changed
@@ -837,25 +588,20 @@ private
     else
       vals.delete 'status_id'
     end
-    issue.safe_attributes = vals
+    issue.safe_attributes = vals.slice("remaining_hours", "status_id")
     return if !issue.changed?
     issue.save
     hour_update_check_error(issue, issue_id)
   end
 
   def append_error_message_html(html, msg)
-    @message ||= ''
-    @message += '<div style="background:#faa;">' + msg + '</div><br>' if !msg.blank?
+    return if msg.blank?
+    @message = @message.to_s + helpers.content_tag(:div, msg, class: 'wt_error').to_s + '<br>'
   end
 
   def hour_update_check_error(obj, issue_id)
-    return "" if obj.errors.empty?
-    str = l("field_issue")+"#"+issue_id.to_s+"<br>"
-    fm = obj.errors.full_messages
-    fm.each do |msg|
-        str += msg+"<br>"
-    end
-    str.html_safe
+    return '' if obj.errors.empty?
+    helpers.safe_join(["#{l(:field_issue)}##{issue_id}"] + obj.errors.full_messages, helpers.tag.br)
   end
 
   def member_add_del_check
@@ -924,47 +670,30 @@ private
     
   end
 
-  def update_daily_memo(text, append = false) # 日ごとメモの更新
-    year = params[:year] || return
-    month = params[:month] || return
-    day = params[:day] || return
-    user_id = params[:user] || return
-
-    # ユーザと日付で既存のメモを検索
-    date = Date.new(year.to_i,month.to_i,day.to_i)
-    memo = WtDailyMemo.where(["day=:d and user_id=:u",{:d=>date,:u=>user_id}]).first
-
-    if memo then
-      # 既存のメモがあれば
-      text = memo.description + text if append
-      memo.description = text
-      memo.updated_on = Time.now
-      memo.save # 更新
-    else
-      # 既存のメモがなければ新規作成
-      now = Time.now
-      WtDailyMemo.create(:user_id=>user_id,
-                         :day=>date,
-                         :created_on=>now,
-                         :updated_on=>now,
-                         :description=>text)
-    end
+  def update_daily_memo(text, append = false)
+    return unless request.post?
+    return unless @this_uid == @crnt_uid || (append && @project && User.current.allowed_to?(:edit_work_time_other_member, @project))
+    memo = WtDailyMemo.find_or_initialize_by(day: @this_date, user_id: @this_uid)
+    memo.created_on ||= Time.current
+    memo.updated_on = Time.current
+    memo.description = append ? memo.description.to_s + text.to_s : text.to_s
+    memo.save!
   end
 
-  ################################ 休日設定
   def set_holiday
-    user_id = params["user"] || return
-    if set_date = params['set_holiday'] then
-      WtHolidays.create(:holiday=>set_date, :created_on=>Time.now, :created_by=>user_id)
-    end
-    if del_date = params['del_holiday'] then
-      holidays = WtHolidays.where(["holiday=:h and deleted_on is null",{:h=>del_date}]).all
-      holidays.each do |h|
-        h.deleted_on = Time.now
-        h.deleted_by = user_id
-        h.save
+    return unless request.post? && User.current.admin?
+    if params[:set_holiday].present?
+      date = Date.iso8601(params[:set_holiday])
+      unless WtHolidays.exists?(holiday: date, deleted_on: nil)
+        WtHolidays.create!(holiday: date, created_on: Time.current, created_by: User.current.id)
       end
     end
+    if params[:del_holiday].present?
+      date = Date.iso8601(params[:del_holiday])
+      WtHolidays.where(holiday: date, deleted_on: nil).update_all(deleted_on: Time.current, deleted_by: User.current.id)
+    end
+  rescue Date::Error
+    raise ActionController::BadRequest, 'Invalid holiday date'
   end
 
   def change_member_position
@@ -1015,6 +744,9 @@ private
       if User.current.allowed_to?(:edit_work_time_total, @project) then
         issue_id = $1.to_i
         dst = $2.to_i
+        issue = visible_work_time_issue!(issue_id)
+        raise ActiveRecord::RecordNotFound unless User.current.allowed_to?(:edit_work_time_total, issue.project)
+        raise ActionController::BadRequest, 'Invalid display position' unless dst.positive?
         relay = WtTicketRelay.where(["issue_id=:i",{:i=>issue_id}]).first
         if relay then
           if relay.position > dst then # 前に持っていく場合
@@ -1058,6 +790,9 @@ private
     return if !(params[:prj_pos]=~/^(.*)_(.*)$/) # パラメータの形式が正しくなければパス
     dsp_prj = $1.to_i
     dst = $2.to_i
+    project = Project.visible.find(dsp_prj)
+    raise ActiveRecord::RecordNotFound unless User.current.allowed_to?(:edit_work_time_total, project)
+    raise ActionController::BadRequest, 'Invalid display position' unless dst.positive?
 
     if !User.current.allowed_to?(:edit_work_time_total, @project) then
        # 権限が無ければパス
@@ -1110,12 +845,13 @@ private
     end
 
     #当月の時間記録を抽出
-    TimeEntry.
+    TimeEntry.visible(User.current).
         where(["spent_on>=:t1 and spent_on<=:t2 and hours>0",{:t1 => @first_date, :t2 => @last_date}]).
         all.
         each do |time_entry|
       iid = time_entry.issue_id
       uid = time_entry.user_id
+      next unless can_view_member_time?(uid, time_entry.project)
       # Redmine 6.1 returns TimeEntry#hours as a Rational. Keep a Float here so
       # the sums below do not end up as "19/4" in the CSV and API output.
       cost = time_entry.hours.to_f
@@ -1184,34 +920,30 @@ private
   end
 
   def get_parent_issue(relay, iid)
-    @issue_parent ||= Hash.new
-    return @issue_parent[iid] if @issue_parent.has_key?(iid)
-    issue = Issue.find_by_id(iid)
-    return 0 if issue.nil? # issueが削除されていたらそこまで
-    @issue_cost[iid] ||= Hash.new
-
-    if relay.has_key?(iid)
-      parent_id = relay[iid]
-      if parent_id != 0 && parent_id != iid
-        parent_id = get_parent_issue(relay, parent_id)
+    @issue_parent ||= {}
+    return @issue_parent[iid] if @issue_parent.key?(iid)
+    path = Set.new
+    current = iid
+    loop do
+      return @issue_parent[iid] = iid if path.include?(current)
+      path.add(current)
+      issue = Issue.find_by(id: current)
+      return @issue_parent[iid] = 0 unless issue
+      # Report metadata contains no grants; it is derived from visible entries.
+      unless relay.key?(current)
+        WtTicketRelay.create!(issue_id: current, position: WtTicketRelay.maximum(:position).to_i + 1, parent: 0)
+        relay[current] = 0
       end
-      parent_id = iid if parent_id == 0
-    else
-      # 関連が登録されていない場合は登録する
-      WtTicketRelay.create(:issue_id=>iid, :position=>relay.size, :parent=>0)
-      parent_id = iid
-    end
-
-    # iid に対する初めての処理
-    pid = issue.project_id
-    unless @prj_cost.has_key?(pid)
-      check = WtProjectOrders.where(["uid=-1 and dsp_prj=:p",{:p=>pid}]).all
-      if check.size == 0
-        WtProjectOrders.create(:uid=>-1, :dsp_prj=>pid, :dsp_pos=>@prj_cost.size)
+      if issue.visible? && can_view_work_time_project?(issue.project)
+        WtProjectOrders.find_or_create_by!(uid: -1, dsp_prj: issue.project_id) do |order|
+          order.dsp_pos = WtProjectOrders.where(uid: -1).maximum(:dsp_pos).to_i + 1
+        end
       end
+      parent = relay[current].to_i
+      break if parent.zero? || parent == current
+      current = parent
     end
-
-    @issue_parent[iid] = parent_id # return
+    @issue_parent[iid] = current
   end
 
   def make_pack
@@ -1230,12 +962,13 @@ private
     @day_pack[:total_by_day].default = 0
 
     # プロジェクト順の表示データを作成
-    dsp_prjs = Project.joins("INNER JOIN wt_project_orders ON wt_project_orders.dsp_prj=projects.id").
+    dsp_prjs = Project.visible.joins("INNER JOIN wt_project_orders ON wt_project_orders.dsp_prj=projects.id").
         where(["wt_project_orders.uid=:u",{:u=>@this_uid}]).
         select("projects.*, wt_project_orders.dsp_pos as dsp_pos").
         order("wt_project_orders.dsp_pos").
         all
     dsp_prjs.each do |prj|
+      next unless can_view_member_time?(@this_uid, prj)
       next if @restrict_project && @restrict_project!=prj.id
       make_pack_prj(@month_pack, prj, prj.dsp_pos)
       make_pack_prj(@day_pack, prj, prj.dsp_pos)
@@ -1243,12 +976,13 @@ private
     @prj_odr_max = dsp_prjs.length
 
     # チケット順の表示データを作成
-    dsp_issues = Issue.joins("INNER JOIN user_issue_months ON user_issue_months.issue=issues.id").
+    dsp_issues = Issue.visible.joins("INNER JOIN user_issue_months ON user_issue_months.issue=issues.id").
         where(["user_issue_months.uid=:u",{:u=>@this_uid}]).
         order("user_issue_months.odr").
         select("issues.*, user_issue_months.odr").
         all
     dsp_issues.each do |issue|
+      next unless can_view_member_time?(@this_uid, issue.project)
       next if @restrict_project && @restrict_project!=issue.project.id
       month_prj_pack = make_pack_prj(@month_pack, issue.project)
       make_pack_issue(month_prj_pack, issue, issue.odr)
@@ -1258,13 +992,14 @@ private
     @issue_odr_max = dsp_issues.length
 
     # 月内の工数を集計
-    hours = TimeEntry.
+    hours = TimeEntry.visible(User.current).
         includes(:issue).
         where(["user_id=:uid and spent_on>=:day1 and spent_on<=:day2",
                {:uid => @this_uid, :day1 => @first_date, :day2 => @last_date}]).
         all
     hours.each do |hour|
       next if @restrict_project && @restrict_project!=hour.project.id
+      next unless can_view_member_time?(hour.user_id, hour.project)
       work_time = hour.hours.to_f # Rational since Redmine 6.1, see calc_total
       if hour.issue && hour.issue.visible? then
         # 表示項目に工数のプロジェクトがあるかチェック→なければ項目追加
@@ -1327,6 +1062,7 @@ private
                           {:u => @this_user, :t1 => t1, :t2 => t2}]).all
 
     issues.each do |issue|
+      next unless can_view_member_time?(@this_uid, issue.project)
       next if @restrict_project && @restrict_project!=issue.project.id
       next if !@this_user.allowed_to?(:log_time, issue.project)
       next if !issue.visible?
@@ -1348,6 +1084,7 @@ private
                 )", {:u => @this_uid, :t2 => t2, :closed => false}]).
         all
     issues.each do |issue|
+      next unless can_view_member_time?(@this_uid, issue.project)
       next if @restrict_project && @restrict_project!=issue.project.id
       next if !@this_user.allowed_to?(:log_time, issue.project)
       next if !issue.visible?
@@ -1456,6 +1193,147 @@ private
       end
     end
     update
+  end
+
+  def can_view_work_time_project?(project)
+    project && project.visible? && (User.current.allowed_to?(:view_work_time_tab, project) ||
+                                   User.current.allowed_to?(:view_work_time_other_member, project))
+  end
+
+  def can_view_member_time?(user_id, project)
+    can_view_work_time_project?(project) && (user_id == User.current.id ||
+      User.current.allowed_to?(:view_work_time_other_member, project))
+  end
+
+  def visible_work_time_issue!(id)
+    issue = Issue.visible.find(id)
+    raise ActiveRecord::RecordNotFound unless can_view_work_time_project?(issue.project)
+    issue
+  end
+
+  def authorize_work_time_request
+    @project = nil
+    if params[:id].present?
+      return unless find_project
+      unless can_view_work_time_project?(@project)
+        render_403
+        return
+      end
+    end
+    project_actions = %w(show total total_data total_data_with_act edit_relay relay_total
+                         relay_total_data relay_total_data_with_act register_project_settings ajax_relay)
+    if project_actions.include?(action_name) && !@project
+      render_404
+      return
+    end
+    if %w(register_project_settings edit_relay).include?(action_name) &&
+       !User.current.allowed_to?(:edit_work_time_total, @project)
+      render_403
+      return
+    end
+    report_actions = %w(total total_data total_data_with_act relay_total relay_total_data relay_total_data_with_act)
+    if report_actions.include?(action_name) && !User.current.allowed_to?(:view_work_time_other_member, @project)
+      render_403
+      return
+    end
+    @project = nil if action_name == 'index'
+    prepare_values
+    if params[:time_entry].present?
+      validate_work_time_fields!(params[:time_entry])
+      params[:time_entry].each_pair do |id, values|
+        validate_work_time_fields!(values)
+        authorized_time_entry!(id)
+      end
+    end
+    if params[:new_time_entry].present?
+      validate_work_time_fields!(params[:new_time_entry])
+      params[:new_time_entry].each_pair do |id, entries|
+        validate_work_time_fields!(entries)
+        visible_work_time_issue!(id)
+        entries.each_pair { |_, values| validate_work_time_fields!(values) }
+      end
+    end
+    params.each_pair do |key, values|
+      validate_work_time_fields!(values) if key.match?(/\A(?:new_)?time_entry_\d/)
+    end
+    if (params.key?(:set_holiday) || params.key?(:del_holiday)) && !User.current.admin?
+      render_403
+    end
+  end
+
+  def validate_work_time_fields!(fields)
+    raise ActionController::BadRequest, 'Invalid time entry fields' unless fields.is_a?(ActionController::Parameters)
+  end
+
+  def authorized_time_entry!(id)
+    entry = TimeEntry.find(id)
+    unless entry.user_id == @this_uid && entry.spent_on == @this_date &&
+           entry.editable_by?(User.current) && can_view_work_time_project?(entry.project) &&
+           (!@restrict_project || entry.project_id == @restrict_project) &&
+           (@this_uid == @crnt_uid || (@project && User.current.allowed_to?(:edit_work_time_other_member, @project)))
+      raise ActiveRecord::RecordNotFound
+    end
+    entry
+  end
+
+  def require_work_time_post
+    mutations = %w(time_entry new_time_entry memo set_holiday del_holiday ticket_pos prj_pos
+                   ticket_del member_pos parent_id)
+    writes = %w(ajax_add_tickets_insert ajax_done_ratio_update register_project_settings)
+    if !request.post? && (writes.include?(action_name) || mutations.any? { |key| params.key?(key) })
+      response.set_header('Allow', 'POST')
+      head :method_not_allowed
+    end
+  end
+
+  def accounting_period_start(month)
+    month.change(day: [@account_start_day, month.end_of_month.day].min)
+  end
+
+  def send_work_time_csv(rows, filename)
+    data = CSV.generate do |csv|
+      rows.each do |row|
+        csv << row.map do |value|
+          value.is_a?(String) && value.match?(/\A(?:[[:space:]]*[=+\-@]|[\t\r\n])/) ? "'#{value}" : value
+        end
+      end
+    end
+    send_data Redmine::CodesetUtil.from_utf8(data, l(:general_csv_encoding)), type: 'text/csv', filename: filename
+  end
+
+  def export_project_csv(relayed:, activities:)
+    header = ['user']
+    header += ['relayed project', 'relayed ticket'] unless relayed
+    header += ['project', 'ticket']
+    header << 'activity' if activities
+    rows = [header + ['spent time']]
+    costs = if activities
+      relayed ? @r_issue_act_cost : @issue_act_cost
+    else
+      relayed ? @r_issue_cost : @issue_cost
+    end
+    @members.each do |_, user|
+      costs.each do |issue_id, member_costs|
+        next unless member_costs.key?(user.id)
+        issue = Issue.visible.find_by(id: issue_id)
+        labels = issue ? [issue.project.to_s, "##{issue.id} #{issue.subject}"] : ['private', 'private']
+        unless relayed
+          parent = Issue.visible.find_by(id: @issue_parent[issue_id])
+          labels = (parent ? [parent.project.to_s, "##{parent.id} #{parent.subject}"] : ['private', 'private']) + labels
+        end
+        if activities
+          member_costs[user.id].each do |activity_id, hours|
+            name = issue ? (TimeEntryActivity.find_by(id: activity_id)&.name || 'nil') : 'private'
+            rows << [user.to_s] + labels + [name, hours]
+          end
+        elsif member_costs[user.id] != 0
+          rows << [user.to_s] + labels + [member_costs[user.id]]
+        end
+      end
+    end
+    filename = relayed ? 'monthly_report' : 'monthly_report_raw'
+    filename += '_with_act' if activities
+    send_work_time_csv(rows, "#{filename}.csv")
   end
 
 end

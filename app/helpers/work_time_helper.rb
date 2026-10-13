@@ -3,7 +3,7 @@ module WorkTimeHelper
     return "" unless issue
     issue_cost_est = issue.estimated_hours
     return "" unless issue_cost_est
-    issue_cost = TimeEntry.where(:issue_id => issue.id).sum(:hours).to_f
+    issue_cost = work_time_visible_issue_hours(issue)
     return sprintf("(%1.1f/%1.1f)",issue_cost,issue_cost_est)
   end
 
@@ -11,8 +11,14 @@ module WorkTimeHelper
     return "" unless issue
     issue_cost_est = issue.estimated_hours
     return "" unless issue_cost_est
-    issue_cost = TimeEntry.where(:issue_id => issue.id).sum(:hours).to_f
+    issue_cost = work_time_visible_issue_hours(issue)
     return sprintf("%1.0f",issue_cost/issue_cost_est*100)
+  end
+
+  def work_time_visible_issue_hours(issue)
+    entries = TimeEntry.visible(User.current).where(issue_id: issue.id)
+    entries = entries.where(user_id: User.current.id) unless User.current.allowed_to?(:view_work_time_other_member, issue.project)
+    entries.sum(:hours).to_f
   end
 
   def wk_pretty_issue_name(issue, issue_id = issue.id)
