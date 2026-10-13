@@ -1,3 +1,0 @@
-= WorkTime for Redmine 6.1
-
-See README.md for installation, configuration, usage, validation, and license information.

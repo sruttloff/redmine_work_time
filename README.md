@@ -117,6 +117,8 @@ These plugins are optional additions. For hosting and other services, visit **[w
 
 ## Support and credits
 
+Historical development notes are preserved in [CHANGELOG.md](CHANGELOG.md). Current release notes are maintained in [NEWS.md](NEWS.md).
+
 For support with this fork, use the contact options at **[SaaS-Secure.com](https://www.saas-secure.com/)**. GitHub Issues are currently disabled in this fork. Include your Redmine, Ruby, Rails, database, and plugin versions, installed plugins, and steps to reproduce the problem.
 
 - Original plugin and upstream maintenance: [Tomohisa Kusukawa and contributors](https://github.com/redmine-work-time/redmine_work_time).
