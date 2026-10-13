@@ -31,7 +31,7 @@ class WorkTimeController < ApplicationController
   def show
     @message = ""
     require_login || return
-    find_project
+    find_project || return
     authorize
     prepare_values
     if @this_user.nil? || !@this_user.allowed_to?(:view_work_time_tab, @project)
@@ -57,7 +57,7 @@ class WorkTimeController < ApplicationController
   def member_monthly_data
     require_login || return
     if params.key?(:id) then
-      find_project
+      find_project || return
     end
     prepare_values
     make_pack
@@ -85,7 +85,7 @@ class WorkTimeController < ApplicationController
   def member_monthly_data_table
     require_login || return
     if params.key?(:id) then
-      find_project
+      find_project || return
     end
     prepare_values
     make_pack
@@ -121,7 +121,7 @@ class WorkTimeController < ApplicationController
 
   def total
     @message = ""
-    find_project
+    find_project || return
     authorize
     prepare_values
     change_member_position
@@ -133,7 +133,7 @@ class WorkTimeController < ApplicationController
   end
 
   def total_data
-    find_project
+    find_project || return
     authorize
     prepare_values
     change_member_position
@@ -188,7 +188,7 @@ class WorkTimeController < ApplicationController
   end
 
   def total_data_with_act
-    find_project
+    find_project || return
     authorize
     prepare_values
     change_member_position
@@ -238,7 +238,7 @@ class WorkTimeController < ApplicationController
 
   def edit_relay
     @message = ""
-    find_project
+    find_project || return
     authorize
     prepare_values
     change_member_position
@@ -268,7 +268,7 @@ class WorkTimeController < ApplicationController
   end
 
   def relay_total_data
-    find_project
+    find_project || return
     authorize
     prepare_values
     change_member_position
@@ -319,7 +319,7 @@ class WorkTimeController < ApplicationController
   end
 
   def relay_total_data_with_act
-    find_project
+    find_project || return
     authorize
     prepare_values
     change_member_position
@@ -363,12 +363,12 @@ class WorkTimeController < ApplicationController
 
   def ajax_relay
     if !params.key?(:issue_id)
-      render :layout=>false, :text=>'ERROR: no issue_id'
+      render :layout=>false, :plain=>'ERROR: no issue_id'
       return
     end
     @issue_id = params[:issue_id].to_i
 
-    find_project
+    find_project || return
     @message = ''
     @parent_disp = ''
     @relay_modified = false
@@ -386,7 +386,7 @@ class WorkTimeController < ApplicationController
       end
     end
     relay = WtTicketRelay.where(["issue_id=:i",{:i=>@issue_id}]).first
-    @parent_id = relay.parent
+    @parent_id = relay ? relay.parent : 0 # no relay stored for this issue yet
 
     if @parent_id != 0 && !((parent = Issue.find_by_id(@parent_id)).nil?) then
       @parent_disp = parent.closed? ? '<del>'+parent.to_s+'</del>' : parent.to_s
@@ -474,8 +474,8 @@ class WorkTimeController < ApplicationController
     @add_count = params[:count]
     if @this_uid==@crnt_uid then
       add_issue = Issue.find_by_id(@add_issue_id)
-      @add_issue_children_cnt = Issue.where(["parent_id = ?", add_issue.id.to_s]).count
       if add_issue && add_issue.visible? then
+        @add_issue_children_cnt = Issue.where(["parent_id = ?", add_issue.id.to_s]).count
         prj = add_issue.project
         if User.current.allowed_to?(:log_time, prj) then
           if add_issue.closed? then
@@ -519,10 +519,6 @@ class WorkTimeController < ApplicationController
     render(:layout=>false)
   end
 
-  def ajax_memo_edit # 日毎のメモ入力フォームを出力するAjaxアクション
-    render(:layout=>false)
-  end
-
   def ajax_done_ratio_input # 進捗％更新ポップアップ
     prepare_values
     issue_id = params[:issue_id]
@@ -551,7 +547,7 @@ class WorkTimeController < ApplicationController
   def register_project_settings
     @message = ""
     require_login || return
-    find_project
+    find_project || return
     authorize
     @settings = Setting.plugin_redmine_work_time
     @settings = Hash.new unless @settings.is_a?(Hash)
@@ -568,6 +564,7 @@ private
     @project = Project.find(params[:id])
   rescue ActiveRecord::RecordNotFound
     render_404
+    false # callers must return, otherwise rendering happens twice
   end
 
   def prepare_values
@@ -1119,7 +1116,9 @@ private
         each do |time_entry|
       iid = time_entry.issue_id
       uid = time_entry.user_id
-      cost = time_entry.hours
+      # Redmine 6.1 returns TimeEntry#hours as a Rational. Keep a Float here so
+      # the sums below do not end up as "19/4" in the CSV and API output.
+      cost = time_entry.hours.to_f
       act = time_entry.activity_id
       # 本プロジェクトのユーザの工数でなければパス
       next unless @member_cost.key?(uid)
@@ -1266,7 +1265,7 @@ private
         all
     hours.each do |hour|
       next if @restrict_project && @restrict_project!=hour.project.id
-      work_time = hour.hours
+      work_time = hour.hours.to_f # Rational since Redmine 6.1, see calc_total
       if hour.issue && hour.issue.visible? then
         # 表示項目に工数のプロジェクトがあるかチェック→なければ項目追加
         prj_pack = make_pack_prj(@month_pack, hour.project)

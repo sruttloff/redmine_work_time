@@ -4,8 +4,8 @@ Redmine::Plugin.register :redmine_work_time do
   name 'Redmine Work Time plugin'
   author 'Tomohisa Kusukawa'
   description 'A plugin to view and update TimeEntry by each user'
-  version '0.4.3'
-  url 'http://www.redmine.org/plugins/redmine_work_time'
+  version '0.4.4'
+  url 'https://github.com/sruttloff/redmine_work_time'
   author_url 'http://about.me/tkusukawa'
 
   project_module :work_time do
@@ -37,11 +37,19 @@ Redmine::Plugin.register :redmine_work_time do
 
   settings :default => {'account_start_days' => {}, 'show_account_menu' => 'true'},
            :partial => 'settings/work_time_settings'
+end
 
-  Rails.configuration.to_prepare do
-    require_dependency 'projects_helper'
-    unless ProjectsHelper.included_modules.include? WorkTimeProjectsHelperPatch
-      ProjectsHelper.send(:include, WorkTimeProjectsHelperPatch)
-    end
-  end
+# Redmine's plugin loader already runs init.rb inside Rails' to_prepare block,
+# so the patch is (re)applied after every code reload. Registering another
+# Rails.configuration.to_prepare block here would never run: that list has
+# already been consumed by the time plugins are loaded, which left the project
+# settings tab missing whenever eager loading was off (development, test).
+unless ProjectsHelper.ancestors.include?(WorkTimeProjectsHelperPatch::ProjectsHelperPatch)
+  # Preserve the current implementation: legacy plugins (redmine_contacts_helpdesk)
+  # alias-wrap the prepended method later and would otherwise create a recursive
+  # super chain that ends in a 500 on the project settings page.
+  WorkTimeProjectsHelperPatch::ProjectsHelperPatch.capture_original_project_settings_tabs(
+    ProjectsHelper.instance_method(:project_settings_tabs)
+  )
+  ProjectsHelper.prepend WorkTimeProjectsHelperPatch::ProjectsHelperPatch
 end
